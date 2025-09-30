@@ -15,7 +15,7 @@
     <description>AI Chatbot Backend POC</description>
     <properties>
         <java.version>17</java.version>
-        <aws.sdk.version>2.21.0</aws.sdk.version>
+        <aws.sdk.version>2.20.55</aws.sdk.version>
         <tika.version>2.9.1</tika.version>
     </properties>
     <dependencies>
@@ -45,6 +45,33 @@
             <version>${aws.sdk.version}</version>
         </dependency>
         
+        <!-- AWS S3 -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>s3</artifactId>
+            <version>${aws.sdk.version}</version>
+        </dependency>
+        
+        <!-- AWS SQS -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>sqs</artifactId>
+            <version>${aws.sdk.version}</version>
+        </dependency>
+        
+        <!-- Spring Cloud AWS for SQS -->
+        <dependency>
+            <groupId>io.awspring.cloud</groupId>
+            <artifactId>spring-cloud-aws-starter-sqs</artifactId>
+            <version>3.0.0</version>
+        </dependency>
+        
+        <!-- Spring Messaging for SQS annotations -->
+        <dependency>
+            <groupId>org.springframework</groupId>
+            <artifactId>spring-messaging</artifactId>
+        </dependency>
+        
         <!-- File Processing -->
         <dependency>
             <groupId>org.apache.tika</groupId>
@@ -61,6 +88,19 @@
         <dependency>
             <groupId>com.fasterxml.jackson.core</groupId>
             <artifactId>jackson-databind</artifactId>
+        </dependency>
+        
+        <!-- Rate Limiting -->
+        <dependency>
+            <groupId>com.github.vladimir-bukhtoyarov</groupId>
+            <artifactId>bucket4j-core</artifactId>
+            <version>7.6.0</version>
+        </dependency>
+        
+        <!-- AOP for aspects -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-aop</artifactId>
         </dependency>
         
         <!-- Testing -->

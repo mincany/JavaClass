@@ -1,61 +1,56 @@
 # AI Chatbot Backend POC
 
-A Spring Boot application that provides a REST API for an AI-powered chatbot with document ingestion and query capabilities.
+A production-ready Spring Boot application that provides a REST API for an AI-powered chatbot with document ingestion and query capabilities using AWS SQS for asynchronous processing.
 
 ## Features
 
 - **User Registration**: Create users with API keys
-- **Knowledge Import**: Upload and process text documents (TXT, PDF, DOCX, MD)
+- **Knowledge Import**: Upload and process text documents (TXT, PDF, MD) via S3 and SQS
 - **AI-Powered Chat**: Ask questions about uploaded documents using OpenAI
 - **Vector Search**: Uses Pinecone for semantic search of document content
+- **Asynchronous Processing**: SQS-based background processing for scalability
+- **File Storage**: AWS S3 for reliable file storage
+- **Rate Limiting**: Built-in rate limiting and idempotency
+- **Comprehensive Monitoring**: Health checks and status tracking
 
 ## Prerequisites
 
 - Java 17+
 - Maven 3.6+
-- Docker (for local DynamoDB)
+- AWS Account (S3, SQS, DynamoDB) OR LocalStack for development
 - OpenAI API key
 - Pinecone API key and index
 
-## Setup Instructions
+## Quick Start
 
-### 1. Local DynamoDB Setup
-
-```bash
-# Start local DynamoDB
-docker run -p 8000:8000 amazon/dynamodb-local
-
-# Create tables
-aws dynamodb create-table \
-  --table-name chatbot-users \
-  --attribute-definitions AttributeName=id,AttributeType=S \
-  --key-schema AttributeName=id,KeyType=HASH \
-  --billing-mode PAY_PER_REQUEST \
-  --endpoint-url http://localhost:8000
-
-aws dynamodb create-table \
-  --table-name chatbot-knowledge \
-  --attribute-definitions AttributeName=id,AttributeType=S \
-  --key-schema AttributeName=id,KeyType=HASH \
-  --billing-mode PAY_PER_REQUEST \
-  --endpoint-url http://localhost:8000
-```
-
-### 2. Environment Variables
+### Option 1: Local Development with LocalStack (Recommended)
 
 ```bash
-export OPENAI_API_KEY="your-openai-api-key"
-export PINECONE_API_KEY="your-pinecone-api-key"
-export PINECONE_API_URL="your-pinecone-index-url"
-```
+# 1. Set up LocalStack and AWS services
+./setup-localstack.sh
 
-### 3. Run Application
+# 2. Copy and configure environment variables
+cp environment-template.txt .env
+# Edit .env with your OpenAI and Pinecone API keys
 
-```bash
+# 3. Run the application
 mvn spring-boot:run
+
+# 4. Verify everything works
+./verify-setup.sh
 ```
 
-The application will start on `http://localhost:9090`
+### Option 2: Production AWS Setup
+
+See `DEPLOYMENT_SETUP_GUIDE.md` for complete production setup instructions.
+
+## Setup Files
+
+- **`DEPLOYMENT_SETUP_GUIDE.md`** - Complete setup guide for all environments
+- **`environment-template.txt`** - Environment variables template
+- **`setup-localstack.sh`** - Automated LocalStack setup script
+- **`verify-setup.sh`** - System verification script
+- **`SQS_INTEGRATION_GUIDE.md`** - Detailed SQS architecture documentation
 
 ## API Usage
 

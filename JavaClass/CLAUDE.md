@@ -82,3 +82,37 @@ Uses simple API key authentication passed as query parameter `api_key`. Keys are
 - Supports TXT, PDF, DOCX, MD files up to 10MB
 - Uses Apache Tika for text extraction
 - Creates single embedding per document (no chunking in this POC)
+
+## API Endpoints
+
+### 1. User Registration API
+**Endpoint**: `POST /api/v1/auth/register`
+**Functionality**:
+- Accept email
+- Return an API key and success message
+- Vector embedding generation for semantic search
+
+### 2. Knowledge Import API
+**Endpoint**: `POST /api/v1/knowledge/import`
+**Functionality**:
+- Accept text file uploads (TXT, PDF, DOCX, MD)
+- Generate unique knowledge base IDs for isolation
+- Vector embedding generation for semantic search
+
+### 3. Chat Query API
+**Endpoint**: `POST /api/v1/chat/query`
+**Functionality**:
+- Accept user questions with knowledge base ID
+- Retrieve relevant context from knowledge base
+- Send context + question to OpenAI API
+- Return AI-generated response based on uploaded knowledge
+
+## When making commit
+NEVER ADD 
+Generated with [Claude                      │
+│   Code](https://claude.ai/code)                  │
+│                                                  │
+│   Co-Authored-By: Claude                         │
+│   <noreply@anthropic.com>"                       │
+│   Create initial commit with project             │
+│   description      

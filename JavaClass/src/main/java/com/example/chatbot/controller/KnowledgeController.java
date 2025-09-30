@@ -1,152 +1,260 @@
 package com.example.chatbot.controller;
 
+import com.example.chatbot.annotation.Idempotent;
+import com.example.chatbot.annotation.RateLimit;
+import com.example.chatbot.dto.ApiResponse;
+import com.example.chatbot.dto.KnowledgeImportRequest;
+import com.example.chatbot.dto.KnowledgeImportResponse;
+import com.example.chatbot.exception.BusinessException;
 import com.example.chatbot.model.KnowledgeBase;
 import com.example.chatbot.repository.KnowledgeBaseRepository;
-import com.example.chatbot.service.FileService;
-import com.example.chatbot.service.OpenAiService;
-import com.example.chatbot.service.PineconeService;
+import com.example.chatbot.service.AsyncKnowledgeProcessingService;
 import com.example.chatbot.service.UserService;
+import com.example.chatbot.service.S3Service;
+import com.example.chatbot.service.SqsService;
+import com.example.chatbot.dto.KnowledgeProcessingMessage;
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.NotBlank;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.*;
-import org.springframework.web.multipart.MultipartFile;
 
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.time.Instant;
 import java.util.UUID;
 
 @RestController
 @RequestMapping("/api/v1/knowledge")
+@Validated
 public class KnowledgeController {
 
-    private final FileService fileService;
-    private final OpenAiService openAiService;
-    private final PineconeService pineconeService;
+    private static final Logger logger = LoggerFactory.getLogger(KnowledgeController.class);
+
+    private final AsyncKnowledgeProcessingService asyncProcessingService;
     private final UserService userService;
     private final KnowledgeBaseRepository knowledgeBaseRepository;
+    private final S3Service s3Service;
+    private final SqsService sqsService;
 
     @Autowired
-    public KnowledgeController(FileService fileService, OpenAiService openAiService, 
-                              PineconeService pineconeService, UserService userService,
-                              KnowledgeBaseRepository knowledgeBaseRepository) {
-        this.fileService = fileService;
-        this.openAiService = openAiService;
-        this.pineconeService = pineconeService;
+    public KnowledgeController(AsyncKnowledgeProcessingService asyncProcessingService,
+                              UserService userService,
+                              KnowledgeBaseRepository knowledgeBaseRepository,
+                              S3Service s3Service,
+                              SqsService sqsService) {
+        this.asyncProcessingService = asyncProcessingService;
         this.userService = userService;
         this.knowledgeBaseRepository = knowledgeBaseRepository;
+        this.s3Service = s3Service;
+        this.sqsService = sqsService;
     }
 
-    @PostMapping("/import")
-    public ResponseEntity<?> importFile(
-            @RequestParam("file") MultipartFile file,
-            @RequestParam("api_key") String apiKey,
-            @RequestParam(value = "name", required = false) String name,
-            @RequestParam(value = "description", required = false) String description) {
+    /**
+     * Import and process a knowledge base file asynchronously
+     * 
+     * This endpoint demonstrates all API best practices:
+     * - DTOs for request/response (never expose entities)
+     * - Input validation with @Valid and Bean Validation
+     * - Proper HTTP status codes (202 Accepted for async operations)
+     * - Rate limiting to prevent abuse
+     * - Idempotency for safe retries
+     * - Async processing for long-running operations
+     * - Comprehensive logging
+     * - Global exception handling
+     * - API versioning
+     * 
+     * @param request The knowledge import request DTO
+     * @param apiKey The user's API key for authentication
+     * @param idempotencyKey Optional idempotency key for safe retries
+     * @return ResponseEntity with processing status and estimated completion time
+     */
+    @PostMapping(value = "/import", consumes = MediaType.APPLICATION_JSON_VALUE, produces = MediaType.APPLICATION_JSON_VALUE)
+    @RateLimit(key = "knowledge-import", limit = 10, window = 60, useApiKey = true)
+    @Idempotent(keyParam = "idempotency_key", ttlSeconds = 3600, includeBody = true)
+    public ResponseEntity<ApiResponse<KnowledgeImportResponse>> importFile(
+            @Valid @RequestBody KnowledgeImportRequest request,
+            @RequestParam("api_key") @NotBlank(message = "API key is required") String apiKey,
+            @RequestParam(value = "idempotency_key", required = false) String idempotencyKey) {
+        
+        logger.info("Processing knowledge import request: file={}, name={}", 
+                request.getFile(), request.getName());
+        
+        // Validate API key and get user ID
+        String userId = userService.getUserIdFromApiKey(apiKey);
+        if (userId == null) {
+            logger.warn("Invalid API key provided: {}", apiKey.substring(0, Math.min(8, apiKey.length())) + "...");
+            throw new BusinessException("Invalid API key", "UNAUTHORIZED", HttpStatus.UNAUTHORIZED);
+        }
+
+        // Validate file path and permissions
+        validateFilePath(request.getFile());
         
         try {
-            // Validate API key and get user ID
-            String userId = userService.getUserIdFromApiKey(apiKey);
-            if (userId == null) {
-                Map<String, String> errorResponse = new HashMap<>();
-                errorResponse.put("error", "Invalid API key");
-                return ResponseEntity.status(401).body(errorResponse);
-            }
-
-            // Extract text from file
-            String text = fileService.extractText(file);
-
-            // Generate embedding
-            List<Double> embedding = openAiService.createEmbedding(text);
-
-            // Store in Pinecone
+            // Get file size for estimation
+            long fileSize = getFileSize(request.getFile());
+            
+            // Generate knowledge base ID
             String knowledgeBaseId = "kb_" + UUID.randomUUID().toString().substring(0, 8);
-            pineconeService.upsertVector(knowledgeBaseId, embedding, text);
-
-            // Save metadata to DynamoDB
-            KnowledgeBase kb = new KnowledgeBase(knowledgeBaseId, userId, file.getOriginalFilename(), "processed");
-            if (name != null) kb.setName(name);
-            if (description != null) kb.setDescription(description);
-            kb.setFileSize(file.getSize());
+            
+            // Create knowledge base record with initial status
+            String filename = Paths.get(request.getFile()).getFileName().toString();
+            KnowledgeBase kb = new KnowledgeBase(knowledgeBaseId, userId, filename, "uploading");
+            kb.setName(request.getName());
+            if (request.getDescription() != null && !request.getDescription().trim().isEmpty()) {
+                kb.setDescription(request.getDescription().trim());
+            }
+            kb.setFileSize(fileSize);
             
             knowledgeBaseRepository.save(kb);
-
-            Map<String, String> response = new HashMap<>();
-            response.put("knowledge_base_id", knowledgeBaseId);
-            response.put("status", "processed");
-            response.put("message", "File processed successfully");
             
-            return ResponseEntity.ok(response);
-
-        } catch (IllegalArgumentException e) {
-            Map<String, String> errorResponse = new HashMap<>();
-            errorResponse.put("error", e.getMessage());
-            return ResponseEntity.badRequest().body(errorResponse);
+            // Upload file to S3
+            String s3Key = s3Service.generateS3Key(userId, knowledgeBaseId, filename);
+            String s3Url = s3Service.uploadFile(request.getFile(), s3Key, userId, knowledgeBaseId);
+            
+            logger.info("Successfully uploaded file to S3: {} -> {}", request.getFile(), s3Url);
+            
+            // Update knowledge base status to pending processing
+            kb.setStatus("pending");
+            knowledgeBaseRepository.save(kb);
+            
+            // Create and send SQS message for processing
+            KnowledgeProcessingMessage message = new KnowledgeProcessingMessage(
+                    knowledgeBaseId, userId, s3Key, filename, fileSize);
+            
+            String messageId = sqsService.sendKnowledgeProcessingMessage(message);
+            
+            logger.info("Successfully sent processing message to SQS: messageId={}, knowledgeBaseId={}", 
+                    messageId, knowledgeBaseId);
+            
+            // Calculate estimated completion time
+            Instant estimatedCompletion = asyncProcessingService.estimateCompletionTime(fileSize);
+            
+            // Create response
+            KnowledgeImportResponse response = new KnowledgeImportResponse(
+                    knowledgeBaseId,
+                    "pending",
+                    "File uploaded successfully. Processing will begin shortly.",
+                    estimatedCompletion
+            );
+            
+            ApiResponse<KnowledgeImportResponse> apiResponse = ApiResponse.success(response);
+            
+            // Return 202 Accepted for async operations
+            return ResponseEntity.status(HttpStatus.ACCEPTED).body(apiResponse);
+            
         } catch (Exception e) {
-            Map<String, String> errorResponse = new HashMap<>();
-            errorResponse.put("error", "Failed to process file: " + e.getMessage());
-            return ResponseEntity.internalServerError().body(errorResponse);
+            logger.error("Error processing knowledge import: {}", e.getMessage(), e);
+            throw new BusinessException("Failed to process file: " + e.getMessage(), 
+                    "PROCESSING_ERROR", HttpStatus.INTERNAL_SERVER_ERROR);
         }
     }
 
-    @GetMapping("/{id}")
-    public ResponseEntity<?> getKnowledgeBase(
-            @PathVariable String id,
-            @RequestParam("api_key") String apiKey) {
+    /**
+     * Get processing status of a knowledge base
+     * 
+     * @param id The knowledge base ID
+     * @param apiKey The user's API key
+     * @return ResponseEntity with processing status
+     */
+    @GetMapping(value = "/{id}/status", produces = MediaType.APPLICATION_JSON_VALUE)
+    @RateLimit(key = "knowledge-status", limit = 100, window = 60, useApiKey = true)
+    public ResponseEntity<ApiResponse<KnowledgeImportResponse>> getProcessingStatus(
+            @PathVariable @NotBlank(message = "Knowledge base ID is required") String id,
+            @RequestParam("api_key") @NotBlank(message = "API key is required") String apiKey) {
         
-        try {
-            // Validate API key and get user ID
-            String userId = userService.getUserIdFromApiKey(apiKey);
-            if (userId == null) {
-                Map<String, String> errorResponse = new HashMap<>();
-                errorResponse.put("error", "Invalid API key");
-                return ResponseEntity.status(401).body(errorResponse);
-            }
-
-            // Find knowledge base
-            var kbOptional = knowledgeBaseRepository.findById(id);
-            if (kbOptional.isEmpty()) {
-                Map<String, String> errorResponse = new HashMap<>();
-                errorResponse.put("error", "Knowledge base not found");
-                return ResponseEntity.notFound().build();
-            }
-
-            KnowledgeBase kb = kbOptional.get();
-            
-            // Check ownership
-            if (!kb.getUserId().equals(userId)) {
-                Map<String, String> errorResponse = new HashMap<>();
-                errorResponse.put("error", "Access denied");
-                return ResponseEntity.status(403).body(errorResponse);
-            }
-
-            return ResponseEntity.ok(kb);
-
-        } catch (Exception e) {
-            Map<String, String> errorResponse = new HashMap<>();
-            errorResponse.put("error", "Internal server error");
-            return ResponseEntity.internalServerError().body(errorResponse);
+        logger.debug("Getting processing status for knowledge base: {}", id);
+        
+        // Validate API key and get user ID
+        String userId = userService.getUserIdFromApiKey(apiKey);
+        if (userId == null) {
+            logger.warn("Invalid API key provided for status check: {}", id);
+            throw new BusinessException("Invalid API key", "UNAUTHORIZED", HttpStatus.UNAUTHORIZED);
         }
+
+        // Find knowledge base and check ownership
+        var kbOptional = knowledgeBaseRepository.findById(id);
+        if (kbOptional.isEmpty()) {
+            logger.warn("Knowledge base not found for status check: {}", id);
+            throw new BusinessException("Knowledge base not found", "NOT_FOUND", HttpStatus.NOT_FOUND);
+        }
+
+        KnowledgeBase kb = kbOptional.get();
+        
+        if (!kb.getUserId().equals(userId)) {
+            logger.warn("Access denied for status check: {} by user: {}", id, userId);
+            throw new BusinessException("Access denied", "FORBIDDEN", HttpStatus.FORBIDDEN);
+        }
+
+        String status = asyncProcessingService.getProcessingStatus(id);
+        
+        // Create response based on status
+        KnowledgeImportResponse response;
+        switch (status) {
+            case "completed":
+                response = KnowledgeImportResponse.completed(id);
+                break;
+            case "failed":
+                response = KnowledgeImportResponse.failed(id, "Processing failed");
+                break;
+            case "processing":
+                response = KnowledgeImportResponse.processing(id, 2); // 2 minutes estimate
+                break;
+            default:
+                response = new KnowledgeImportResponse(id, status, "Status: " + status, null);
+        }
+        
+        logger.debug("Processing status for knowledge base {}: {}", id, status);
+        
+        ApiResponse<KnowledgeImportResponse> apiResponse = ApiResponse.success(response);
+        
+        return ResponseEntity.ok(apiResponse);
     }
 
-    @GetMapping
-    public ResponseEntity<?> listKnowledgeBases(@RequestParam("api_key") String apiKey) {
+    /**
+     * Validate file path and check file accessibility
+     */
+    private void validateFilePath(String filePath) {
+        if (filePath == null || filePath.trim().isEmpty()) {
+            throw new BusinessException("File path cannot be empty", "INVALID_FILE_PATH", HttpStatus.BAD_REQUEST);
+        }
+        
+        Path path = Paths.get(filePath);
+        
+        if (!Files.exists(path)) {
+            throw new BusinessException("File not found: " + filePath, "FILE_NOT_FOUND", HttpStatus.NOT_FOUND);
+        }
+        
+        if (!Files.isReadable(path)) {
+            throw new BusinessException("File is not readable: " + filePath, "FILE_NOT_READABLE", HttpStatus.FORBIDDEN);
+        }
+        
+        // Validate file extension
+        String fileName = path.getFileName().toString().toLowerCase();
+        if (!fileName.endsWith(".txt") && !fileName.endsWith(".pdf") && !fileName.endsWith(".md")) {
+            throw new BusinessException("Unsupported file type. Only .txt, .pdf, and .md files are allowed", 
+                    "UNSUPPORTED_FILE_TYPE", HttpStatus.BAD_REQUEST);
+        }
+        
+        logger.debug("File validation passed for: {}", filePath);
+    }
+    
+    /**
+     * Get file size safely
+     */
+    private long getFileSize(String filePath) {
         try {
-            // Validate API key and get user ID
-            String userId = userService.getUserIdFromApiKey(apiKey);
-            if (userId == null) {
-                Map<String, String> errorResponse = new HashMap<>();
-                errorResponse.put("error", "Invalid API key");
-                return ResponseEntity.status(401).body(errorResponse);
-            }
-
-            List<KnowledgeBase> knowledgeBases = knowledgeBaseRepository.findByUserId(userId);
-            return ResponseEntity.ok(knowledgeBases);
-
-        } catch (Exception e) {
-            Map<String, String> errorResponse = new HashMap<>();
-            errorResponse.put("error", "Internal server error");
-            return ResponseEntity.internalServerError().body(errorResponse);
+            return Files.size(Paths.get(filePath));
+        } catch (IOException e) {
+            logger.error("Error getting file size for: {}", filePath, e);
+            throw new BusinessException("Unable to read file information", "FILE_READ_ERROR", HttpStatus.BAD_REQUEST);
         }
     }
 } 

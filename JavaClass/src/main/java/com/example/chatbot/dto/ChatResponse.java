@@ -8,6 +8,9 @@ public class ChatResponse {
     private String sessionId;
     private Integer tokensUsed;
     private String knowledgeBaseId;
+    private Integer contextChunksUsed;
+    private Double minScore;
+    private Double maxScore;
 
     public ChatResponse() {}
 
@@ -56,17 +59,43 @@ public class ChatResponse {
         this.knowledgeBaseId = knowledgeBaseId;
     }
 
+    public Integer getContextChunksUsed() {
+        return contextChunksUsed;
+    }
+
+    public void setContextChunksUsed(Integer contextChunksUsed) {
+        this.contextChunksUsed = contextChunksUsed;
+    }
+
+    public Double getMinScore() {
+        return minScore;
+    }
+
+    public void setMinScore(Double minScore) {
+        this.minScore = minScore;
+    }
+
+    public Double getMaxScore() {
+        return maxScore;
+    }
+
+    public void setMaxScore(Double maxScore) {
+        this.maxScore = maxScore;
+    }
+
     public static class SourceInfo {
         private String chunkId;
+        private String documentName;
+        private Integer chunkIndex;
         private Double relevanceScore;
-        private String textPreview;
 
         public SourceInfo() {}
 
-        public SourceInfo(String chunkId, Double relevanceScore, String textPreview) {
+        public SourceInfo(String chunkId, String documentName, Integer chunkIndex, Double relevanceScore) {
             this.chunkId = chunkId;
+            this.documentName = documentName;
+            this.chunkIndex = chunkIndex;
             this.relevanceScore = relevanceScore;
-            this.textPreview = textPreview;
         }
 
         public String getChunkId() {
@@ -77,20 +106,28 @@ public class ChatResponse {
             this.chunkId = chunkId;
         }
 
+        public String getDocumentName() {
+            return documentName;
+        }
+
+        public void setDocumentName(String documentName) {
+            this.documentName = documentName;
+        }
+
+        public Integer getChunkIndex() {
+            return chunkIndex;
+        }
+
+        public void setChunkIndex(Integer chunkIndex) {
+            this.chunkIndex = chunkIndex;
+        }
+
         public Double getRelevanceScore() {
             return relevanceScore;
         }
 
         public void setRelevanceScore(Double relevanceScore) {
             this.relevanceScore = relevanceScore;
-        }
-
-        public String getTextPreview() {
-            return textPreview;
-        }
-
-        public void setTextPreview(String textPreview) {
-            this.textPreview = textPreview;
         }
     }
 } 
